@@ -1,0 +1,29 @@
+# Large data files — too big for GitHub
+data/raw/
+data/processed/
+data/audit_log.jsonl
+data/eval_results.json
+data/pyg_*.pt
+
+# Keep these in the repo
+!data/graph_cache/
+!data/stgnn_checkpoint.pt
+
+# Secrets — never commit
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Build artifacts
+build_presentation.py
+export_dataset.py
+load_aura.py
+MakFleet_Training_Colab.ipynb
+eda_*.png
+MakFleet_Presentation.pptx
+presentation_script.md
+DWHCS2

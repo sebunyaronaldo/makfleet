@@ -1,0 +1,29 @@
+# Core
+numpy>=2.0
+pandas>=2.2
+scipy>=1.13
+scikit-learn>=1.4
+networkx>=3.6
+
+# Geospatial
+osmnx>=1.9
+geopandas>=0.14
+shapely>=2.0
+
+# Graph ML
+torch>=2.3
+torch_geometric>=2.5
+
+# Knowledge Graph
+neo4j>=5.20
+
+# Privacy
+diffprivlib>=0.6
+
+# Dashboard
+streamlit>=1.36
+folium>=0.17
+plotly>=5.22
+
+# Visualisation
+matplotlib>=3.9

@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip list *)",
+      "Bash(docker --version)",
+      "Bash(python *)",
+      "Bash(pip install *)",
+      "Bash(del *)",
+      "Bash(docker-compose down *)",
+      "Bash(docker-compose up *)",
+      "Bash(streamlit run *)",
+      "Bash(netstat -ano)",
+      "Bash(curl -s http://localhost:8501/healthz)",
+      "Bash(curl -s http://localhost:8501/)",
+      "Bash(taskkill /F /IM python.exe)",
+      "PowerShell(Stop-Process *)",
+      "Bash(git init *)",
+      "Bash(git remote *)",
+      "Bash(git add *)"
+    ]
+  }
+}
