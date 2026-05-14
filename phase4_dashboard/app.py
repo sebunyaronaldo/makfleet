@@ -119,6 +119,18 @@ from phase4_dashboard.rbac import ROLE_DESCRIPTIONS, audit_log
 st.sidebar.caption(ROLE_DESCRIPTIONS.get(role, ""))
 audit_log(role, "dashboard_access")
 
+# Neo4j connectivity status indicator
+try:
+    from phase4_dashboard.causal_evidence import _get_driver
+    _test_driver = _get_driver()
+    if _test_driver:
+        _test_driver.close()
+        st.sidebar.success("Neo4j: Connected", icon="🟢")
+    else:
+        st.sidebar.warning("Neo4j: Unavailable — Aura instance may be paused. Visit console.neo4j.io to resume.", icon="🟡")
+except Exception:
+    st.sidebar.warning("Neo4j: Unavailable", icon="🟡")
+
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------

@@ -14,15 +14,23 @@ from config.settings import NEO4J_URI, NEO4J_AUTH
 
 try:
     from neo4j import GraphDatabase
+    from neo4j.exceptions import ServiceUnavailable, AuthError
     _NEO4J_OK = True
 except ImportError:
     _NEO4J_OK = False
+    ServiceUnavailable = Exception
+    AuthError = Exception
 
 
 def _get_driver():
     if not _NEO4J_OK:
-        raise RuntimeError("neo4j driver not installed")
-    return GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+        return None
+    try:
+        driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+        driver.verify_connectivity()
+        return driver
+    except Exception:
+        return None
 
 
 def get_anomaly_subgraph(event_id: str) -> dict:
@@ -37,10 +45,10 @@ def get_anomaly_subgraph(event_id: str) -> dict:
       neighbors   — list of adjacent intersections (2-hop)
       past_anomalies — driver's prior anomalous events
     """
-    if not _NEO4J_OK:
+    driver = _get_driver()
+    if driver is None:
         return _empty_subgraph(event_id)
 
-    driver = _get_driver()
     try:
         with driver.session() as s:
             result = s.run("""
@@ -82,9 +90,9 @@ def get_anomaly_subgraph(event_id: str) -> dict:
 
 def get_recent_anomalies(limit: int = 50, semester: int | None = None) -> list[dict]:
     """Fetch the most recent anomalous TelematicsEvent records for the dashboard table."""
-    if not _NEO4J_OK:
-        return []
     driver = _get_driver()
+    if driver is None:
+        return []
     try:
         with driver.session() as s:
             if semester:
@@ -106,9 +114,9 @@ def get_recent_anomalies(limit: int = 50, semester: int | None = None) -> list[d
 
 def get_demand_aggregates(semester: int | None = None) -> list[dict]:
     """Hourly trip demand aggregated per campus zone for heatmap rendering."""
-    if not _NEO4J_OK:
-        return []
     driver = _get_driver()
+    if driver is None:
+        return []
     try:
         with driver.session() as s:
             query = """
@@ -127,9 +135,9 @@ def get_demand_aggregates(semester: int | None = None) -> list[dict]:
 
 def get_vehicle_trajectory(vehicle_id: str, semester: int | None = None) -> list[dict]:
     """Fetch all map-matched points for a vehicle (for trajectory map rendering)."""
-    if not _NEO4J_OK:
-        return []
     driver = _get_driver()
+    if driver is None:
+        return []
     try:
         with driver.session() as s:
             if semester:
