@@ -1,38 +1,44 @@
 """
-MakFleet Causal BI Dashboard — Streamlit entry point.
+MakFleet Analytics Platform — Streamlit dashboard.
 
-4 tabs:
-  1. Campus Map      — traffic demand heatmap + anomaly markers
-  2. Anomaly Detection — time-series + flagged events table
-  3. Causal Evidence  — subgraph explanation for selected anomaly
-
-Gap 3: model loading never crashes the dashboard.
-       load_scorer() returns NeuralScorer OR RuleBasedScorer transparently.
+Tabs: Campus Map | Fleet Trajectories | Anomaly Analytics | Causal Evidence | Benchmarks
 """
 
-import sys, os
+import os
+import sys
 from pathlib import Path
 
-# Ensure project root is on sys.path when running from any directory
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import streamlit as st
 
-# Inject Streamlit secrets into environment variables so config/settings.py picks them up
 for _key in ("NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD"):
     if _key in st.secrets:
         os.environ[_key] = st.secrets[_key]
 
 st.set_page_config(
-    page_title="MakFleet — Semantic BI Dashboard",
+    page_title="MakFleet Analytics",
     page_icon="🛵",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+from phase4_dashboard.dashboard_data import (
+    inject_demo_styles,
+    load_benchmark_results,
+    privatize_anomalies,
+    privatize_demand,
+    privatize_trajectory,
+    render_hero,
+    run_and_cache_benchmarks,
+)
+from phase4_dashboard.rbac import ROLE_DESCRIPTIONS, audit_log, check_access
+
+
 # ---------------------------------------------------------------------------
-# Lazy imports (keep startup fast; import heavy libs only when needed)
+# Cached data loaders
 # ---------------------------------------------------------------------------
 
 @st.cache_resource(show_spinner=False)
@@ -45,343 +51,519 @@ def _load_scorer():
         return RuleBasedScorer(), "Rule-based (fallback)"
 
 
-@st.cache_data(ttl=600, show_spinner="Fetching anomalies…")
-def _get_anomalies(semester):
+def _sem(semester_opt: int) -> int | None:
+    return semester_opt if semester_opt != 0 else None
+
+
+def _veh(selected: str) -> str | None:
+    return None if selected == "All" else selected
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _kpis(semester_opt: int):
+    from phase4_dashboard.causal_evidence import get_kpi_summary
+    return get_kpi_summary(_sem(semester_opt))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _anomalies(semester_opt: int, vehicle: str):
     from phase4_dashboard.causal_evidence import get_recent_anomalies
-    return get_recent_anomalies(limit=50, semester=semester if semester != 0 else None)
+    return get_recent_anomalies(100, _sem(semester_opt), _veh(vehicle))
 
 
-@st.cache_data(ttl=600, show_spinner="Fetching demand…")
-def _get_demand(semester):
+@st.cache_data(ttl=300, show_spinner=False)
+def _demand(semester_opt: int):
     from phase4_dashboard.causal_evidence import get_demand_aggregates
-    return get_demand_aggregates(semester=semester if semester != 0 else None)
+    return get_demand_aggregates(_sem(semester_opt))
 
 
-@st.cache_data(ttl=60)
-def _get_trajectory(vehicle_id, semester):
+@st.cache_data(ttl=300, show_spinner=False)
+def _landmarks():
+    from phase4_dashboard.causal_evidence import get_landmarks
+    return get_landmarks()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _semester_cmp():
+    from phase4_dashboard.causal_evidence import get_semester_comparison
+    return get_semester_comparison()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _event_types(semester_opt: int):
+    from phase4_dashboard.causal_evidence import get_event_type_distribution
+    return get_event_type_distribution(_sem(semester_opt))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _hourly(semester_opt: int, vehicle: str):
+    from phase4_dashboard.causal_evidence import get_hourly_anomaly_breakdown
+    return get_hourly_anomaly_breakdown(_sem(semester_opt), _veh(vehicle))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _trajectory(vehicle: str, semester_opt: int):
     from phase4_dashboard.causal_evidence import get_vehicle_trajectory
-    return get_vehicle_trajectory(vehicle_id, semester=semester if semester != 0 else None)
+    return get_vehicle_trajectory(vehicle, _sem(semester_opt))
 
 
-@st.cache_data(ttl=300)
-def _get_subgraph(event_id):
+@st.cache_data(ttl=300, show_spinner=False)
+def _subgraph(event_id: str):
     from phase4_dashboard.causal_evidence import get_anomaly_subgraph
     return get_anomaly_subgraph(event_id)
-
-
-
 
 
 def _map_html(folium_map) -> str | None:
     if folium_map is None:
         return None
     try:
-        import tempfile, os
+        import tempfile
         with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w", encoding="utf-8") as f:
             folium_map.save(f.name)
             fname = f.name
         html = open(fname, encoding="utf-8").read()
         os.unlink(fname)
         return html
-    except Exception as e:
+    except Exception:
         return None
+
+
+def _neo4j_ok() -> bool:
+    try:
+        from phase4_dashboard.causal_evidence import get_pooled_driver
+        return get_pooled_driver() is not None
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 
-st.sidebar.title("🛵 MakFleet ST-KG")
-st.sidebar.markdown("*Semantic-Aware Spatio-Temporal Data Warehouse*")
+inject_demo_styles()
+
+st.sidebar.title("🛵 MakFleet")
+st.sidebar.markdown("**Analytics Platform**")
 st.sidebar.divider()
 
-role = st.sidebar.selectbox(
-    "Access Role",
-    ["admin", "analyst", "public"],
-    help="Controls data visibility (RBAC)"
-)
-
+role = st.sidebar.selectbox("Access Role", ["admin", "analyst", "public"])
 semester_opt = st.sidebar.selectbox(
-    "Semester filter",
+    "Semester",
     [0, 1, 2],
-    format_func=lambda x: {0: "All", 1: "Semester 1 (Jan–Apr)", 2: "Semester 2 (Aug–Oct)"}[x],
+    format_func=lambda x: {0: "All semesters", 1: "Semester 1 (Jan–Apr)", 2: "Semester 2 (Aug–Oct)"}[x],
 )
-
 vehicle_ids = [f"V{i:03d}" for i in range(1, 16)]
-selected_vehicle = st.sidebar.selectbox("Vehicle", ["All"] + vehicle_ids)
+selected_vehicle = st.sidebar.selectbox("Vehicle filter", ["All"] + vehicle_ids)
 
-# Load scorer (Gap 3: never crashes)
 scorer, scorer_label = _load_scorer()
 st.sidebar.divider()
-st.sidebar.caption(f"Scorer: **{scorer_label}**")
-
-from phase4_dashboard.rbac import ROLE_DESCRIPTIONS, audit_log
+st.sidebar.caption(f"**Scorer:** {scorer_label}")
 st.sidebar.caption(ROLE_DESCRIPTIONS.get(role, ""))
-audit_log(role, "dashboard_access")
+audit_log(role, "dashboard_access", {"semester": semester_opt, "vehicle": selected_vehicle})
 
-# Neo4j connectivity status indicator
-try:
-    from phase4_dashboard.causal_evidence import _get_driver
-    _test_driver = _get_driver()
-    if _test_driver:
-        _test_driver.close()
-        st.sidebar.success("Neo4j: Connected", icon="🟢")
-    else:
-        st.sidebar.warning("Neo4j: Unavailable — Aura instance may be paused. Visit console.neo4j.io to resume.", icon="🟡")
-except Exception:
-    st.sidebar.warning("Neo4j: Unavailable", icon="🟡")
+if _neo4j_ok():
+    st.sidebar.success("Neo4j connected", icon="✅")
+else:
+    st.sidebar.warning("Neo4j offline — run `python run_pipeline.py`", icon="⚠️")
+
+if st.sidebar.button("Refresh data", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+# ---------------------------------------------------------------------------
+# Header + KPIs
+# ---------------------------------------------------------------------------
+
+render_hero(scorer_label, _neo4j_ok())
+kpis = _kpis(semester_opt)
+
+k1, k2, k3, k4, k5, k6, k7, k8 = st.columns(8)
+k1.metric("Telematics Events", f"{kpis['total_events']:,}")
+k2.metric("Flagged Anomalies", f"{kpis['anomalies']:,}")
+k3.metric("Anomaly Rate", f"{kpis['anomaly_rate_pct']}%")
+k4.metric("Avg Severity", f"{kpis['avg_severity']:.2f}")
+k5.metric("Safe Stops", f"{kpis['safe_stops']:,}", help="ContextualStop nodes (ontology)")
+k6.metric("Reckless Drivers", kpis["reckless_drivers"])
+k7.metric("Top Event", kpis["top_event_type"])
+k8.metric("Hot Zone", str(kpis["hot_zone"])[:12])
+
+st.divider()
+
+# Load shared datasets
+raw_demand = _demand(semester_opt)
+raw_anomalies = _anomalies(semester_opt, selected_vehicle)
+demand = privatize_demand(raw_demand, role)
+anomalies = privatize_anomalies(raw_anomalies, role)
+landmarks = _landmarks() if role != "public" else []
 
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab1, tab2, tab3 = st.tabs([
+tab_map, tab_fleet, tab_anomaly, tab_causal, tab_bench = st.tabs([
     "🗺️ Campus Map",
-    "⚠️ Anomaly Detection",
+    "🛵 Fleet & Trajectories",
+    "📊 Anomaly Analytics",
     "🔍 Causal Evidence",
+    "⚡ ST-KG vs Star Schema",
 ])
 
 
-# ============================================================
-# TAB 1 — Campus Map
-# ============================================================
-with tab1:
-    st.header("Campus Traffic & Anomaly Map")
+# === TAB 1: Campus Map ======================================================
+with tab_map:
+    st.subheader("Campus Traffic & Safety Map")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Demand zones", len(demand))
+    c2.metric("Anomalies shown", len(anomalies) if role != "public" else 0)
+    c3.metric("Landmarks", len(landmarks))
 
-    col1, col2, col3 = st.columns(3)
-    anomalies = _get_anomalies(semester_opt)
-    demand = _get_demand(semester_opt)
+    show_heat = st.checkbox("Demand heatmap", value=True)
+    show_anom = st.checkbox("Anomaly markers", value=role != "public", disabled=role == "public")
 
-    col1.metric("Total Anomalies", len(anomalies))
-    col2.metric("Demand Zones", len(demand))
-    col3.metric("Active Role", role.upper())
+    if role == "public":
+        st.info("Public role: differential-privacy noise applied to demand aggregates. Anomaly points hidden.")
 
-    with st.spinner("Rendering campus map…"):
+    with st.spinner("Rendering map…"):
         try:
             from phase4_dashboard.map_view import render_campus_map
-            # Cap markers to 50 to keep map responsive
-            fmap = render_campus_map(demand, anomalies[:50], role)
+            fmap = render_campus_map(
+                demand, anomalies[:50], role,
+                landmarks=landmarks,
+                show_heatmap=show_heat,
+                show_anomalies=show_anom,
+            )
             html = _map_html(fmap)
             if html:
-                st.components.v1.html(html, height=520, scrolling=False)
+                st.components.v1.html(html, height=560, scrolling=False)
             else:
-                st.info("Install `folium` to enable map: `pip install folium`")
-        except Exception as e:
-            st.warning(f"Map render error: {e}")
+                st.warning("Install folium: `pip install folium`")
+        except Exception as ex:
+            st.warning(f"Map error: {ex}")
 
-    if role in ("admin", "analyst") and anomalies:
+    if anomalies and check_access(role, "event_types"):
         import pandas as pd
-        st.subheader("Recent Anomalies")
-        df = pd.DataFrame(anomalies)[
-            ["event_id", "vehicle_id", "event_type", "severity_score", "speed_kmh", "timestamp"]
-        ].head(20)
-        st.dataframe(df, use_container_width=True)
+        st.subheader("Recent flagged events")
+        cols = [c for c in [
+            "event_id", "vehicle_id", "event_type", "severity_score", "speed_kmh", "timestamp",
+        ] if c in pd.DataFrame(anomalies).columns]
+        st.dataframe(pd.DataFrame(anomalies)[cols].head(25), use_container_width=True, hide_index=True)
 
 
-# ============================================================
-# TAB 2 — Anomaly Detection
-# ============================================================
-with tab2:
-    st.header("Anomaly Detection — Temporal Analysis")
+# === TAB 2: Fleet ===========================================================
+with tab_fleet:
+    st.subheader("Vehicle Trajectory Explorer")
+    st.caption("Speed-colored path: green → orange → red. Red markers = anomalies.")
 
-    try:
-     anomalies2 = _get_anomalies(semester_opt)
-    except Exception as e:
-     st.error(f"Could not load anomalies: {e}")
-     anomalies2 = []
-    if not anomalies2:
-        st.info("No anomaly data in Neo4j yet. Run the pipeline first.")
+    if role == "public":
+        st.warning("Trajectory view requires **analyst** or **admin** role.")
+    else:
+        vid = selected_vehicle if selected_vehicle != "All" else "V001"
+        st.markdown(f"Showing trajectory for **{vid}**")
+        pts = privatize_trajectory(_trajectory(vid, semester_opt), role)
+
+        if not pts:
+            st.info("No trajectory data. Ensure Neo4j is loaded (`python run_pipeline.py`).")
+        else:
+            fc1, fc2, fc3 = st.columns(3)
+            fc1.metric("GPS points", len(pts))
+            fc2.metric("Anomaly points", sum(1 for p in pts if p.get("is_anomaly")))
+            speeds = [float(p["speed_kmh"]) for p in pts if p.get("speed_kmh") is not None]
+            fc3.metric("Avg speed", f"{sum(speeds)/len(speeds):.1f} km/h" if speeds else "—")
+
+            from phase4_dashboard.map_view import render_trajectory
+            tmap = render_trajectory(pts, vehicle_id=vid)
+            html_t = _map_html(tmap)
+            if html_t:
+                st.components.v1.html(html_t, height=520, scrolling=False)
+
+            import pandas as pd
+            traj_df = pd.DataFrame(pts)
+            if "timestamp" in traj_df.columns and "speed_kmh" in traj_df.columns:
+                import plotly.express as px
+                traj_df["timestamp"] = pd.to_datetime(traj_df["timestamp"], errors="coerce", utc=True)
+                fig_spd = px.line(
+                    traj_df, x="timestamp", y="speed_kmh",
+                    title=f"Speed profile — {vid}",
+                    labels={"speed_kmh": "Speed (km/h)", "timestamp": "Time"},
+                )
+                fig_spd.update_layout(height=320, margin=dict(l=20, r=20, t=40, b=20))
+                st.plotly_chart(fig_spd, use_container_width=True)
+
+
+# === TAB 3: Anomaly Analytics ===============================================
+with tab_anomaly:
+    st.subheader("Temporal & Semantic Anomaly Analytics")
+
+    if not anomalies and role != "public":
+        st.info("No anomalies for current filters. Try **All semesters** or another vehicle.")
+    elif role == "public":
+        st.warning("Detailed anomaly analytics are not available for the public role.")
     else:
         import pandas as pd
         import plotly.express as px
+        import plotly.graph_objects as go
 
-        df_a = pd.DataFrame(anomalies2)
+        hourly_raw = _hourly(semester_opt, selected_vehicle)
+        df_h = pd.DataFrame(hourly_raw)
+        if not df_h.empty and "ts" in df_h.columns:
+            df_h["ts"] = pd.to_datetime(df_h["ts"], errors="coerce", utc=True)
+            df_h["hour"] = df_h["ts"].dt.floor("h")
+            df_h["dow"] = df_h["ts"].dt.day_name()
+            hourly = df_h.groupby(["hour", "event_type"]).size().reset_index(name="count")
 
-        if "timestamp" in df_a.columns:
-            df_a["timestamp"] = pd.to_datetime(df_a["timestamp"], errors="coerce", utc=True)
-            df_a["hour"] = df_a["timestamp"].dt.floor("h")
-            hourly = df_a.groupby(["hour", "event_type"]).size().reset_index(name="count")
-
-            fig = px.bar(
-                hourly,
-                x="hour",
-                y="count",
-                color="event_type",
-                title="Anomaly Events per Hour by Type",
+            fig_bar = px.bar(
+                hourly, x="hour", y="count", color="event_type",
+                title="Anomalies per hour by event type",
                 color_discrete_map={
                     "harsh_braking": "#e74c3c",
                     "rapid_acceleration": "#e67e22",
                     "speeding": "#c0392b",
                     "idling": "#3498db",
                 },
-                labels={"hour": "Time", "count": "Event Count"},
             )
-            st.plotly_chart(fig, use_container_width=True)
+            fig_bar.update_layout(height=380)
+            st.plotly_chart(fig_bar, use_container_width=True)
 
-        # Severity distribution
+            heat = df_h.groupby(["dow", df_h["ts"].dt.hour]).size().reset_index(name="count")
+            heat.columns = ["day", "hour", "count"]
+            day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            fig_heat = px.density_heatmap(
+                heat, x="hour", y="day", z="count",
+                title="Anomaly density (day × hour)",
+                category_orders={"day": day_order},
+                color_continuous_scale="Reds",
+            )
+            fig_heat.update_layout(height=320)
+            st.plotly_chart(fig_heat, use_container_width=True)
+
+        col_l, col_r = st.columns(2)
+        with col_l:
+            types = _event_types(semester_opt)
+            if types:
+                fig_pie = px.pie(
+                    pd.DataFrame(types), names="event_type", values="count",
+                    title="Anomaly mix by semantic type", hole=0.35,
+                )
+                fig_pie.update_layout(height=340)
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+        with col_r:
+            sem_cmp = _semester_cmp()
+            if sem_cmp:
+                df_sem = pd.DataFrame(sem_cmp)
+                fig_sem = go.Figure()
+                fig_sem.add_trace(go.Bar(
+                    name="Total events", x=[f"Sem {int(s['semester'])}" for s in sem_cmp],
+                    y=df_sem["total_events"], marker_color="#3498db",
+                ))
+                fig_sem.add_trace(go.Bar(
+                    name="Anomalies", x=[f"Sem {int(s['semester'])}" for s in sem_cmp],
+                    y=df_sem["anomalies"], marker_color="#e74c3c",
+                ))
+                fig_sem.update_layout(
+                    title="Concept drift: Semester 1 vs 2",
+                    barmode="group", height=340,
+                )
+                st.plotly_chart(fig_sem, use_container_width=True)
+
+        df_a = pd.DataFrame(anomalies)
         if "severity_score" in df_a.columns:
-            fig2 = px.histogram(
-                df_a, x="severity_score", nbins=20,
-                title="Severity Score Distribution",
-                color_discrete_sequence=["#e74c3c"],
+            fig_hist = px.histogram(
+                df_a, x="severity_score", nbins=24,
+                title="Severity distribution", color_discrete_sequence=["#e74c3c"],
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig_hist, use_container_width=True)
 
-        # Full events table
-        st.subheader("Flagged Events")
+        st.subheader("Flagged events registry")
         display_cols = [c for c in [
             "event_id", "vehicle_id", "driver_id", "event_type",
             "severity_score", "speed_kmh", "ax", "timestamp",
         ] if c in df_a.columns]
         st.dataframe(
             df_a[display_cols].sort_values("severity_score", ascending=False).head(100),
-            use_container_width=True,
+            use_container_width=True, hide_index=True,
         )
 
 
-# ============================================================
-# TAB 3 — Causal Evidence
-# ============================================================
-with tab3:
-    st.header("Causal Evidence Generation")
+# === TAB 4: Causal Evidence =================================================
+with tab_causal:
+    st.subheader("Neuro-Symbolic Causal Evidence")
     st.markdown(
-        "_This tab demonstrates semantic evidence generation — answering **why** an anomaly "
-        "was flagged, not just **what** was recorded._"
+        "Select an anomaly to inspect the **2-hop ST-KG subgraph**, ontology context, "
+        "and rule-based / neural explanation."
     )
 
-    from phase4_dashboard.rbac import check_access
     if not check_access(role, "causal_subgraph"):
-        st.warning(f"Role **{role}** does not have access to causal evidence. Switch to analyst or admin.")
+        st.warning(f"Role **{role}** cannot access causal evidence. Switch to analyst or admin.")
+    elif not anomalies:
+        st.info("No anomalies available for investigation.")
     else:
-        anomalies3 = _get_anomalies(semester_opt)
-        if not anomalies3:
-            st.info("No anomaly data found. Run the pipeline and loader first.")
+        import pandas as pd
+        import plotly.graph_objects as go
+
+        df3 = pd.DataFrame(anomalies)
+        labels = {
+            row["event_id"]: f"{row.get('event_type','?')} | {row.get('vehicle_id','?')} | {str(row.get('timestamp',''))[:19]}"
+            for _, row in df3.iterrows()
+        }
+        selected_eid = st.selectbox(
+            "Investigate event",
+            df3["event_id"].tolist(),
+            format_func=lambda x: labels.get(x, x),
+        )
+
+        if selected_eid:
+            subgraph = _subgraph(selected_eid)
+            ev = subgraph.get("event", {})
+            loc = subgraph.get("location", {})
+            loc_labels = subgraph.get("location_labels", [])
+            drv = subgraph.get("driver", {})
+            veh = subgraph.get("vehicle", {})
+            past = subgraph.get("past_anomalies", [])
+            result = scorer.score(ev)
+
+            ca, cb, cc = st.columns(3)
+            with ca:
+                st.metric("Confidence", f"{result.confidence:.1%}")
+            with cb:
+                st.metric("Severity", f"{ev.get('severity_score', 0):.2f}")
+            with cc:
+                st.metric("Prior anomalies (driver)", len(past))
+
+            left, right = st.columns(2)
+            with left:
+                st.markdown("#### Event")
+                st.markdown(f"**Type:** `{ev.get('event_type', '?')}`")
+                st.markdown(f"**Speed:** {ev.get('speed_kmh', 0):.1f} km/h · **Ax:** {ev.get('ax', 0):.2f} m/s²")
+                st.markdown(f"**Time:** {str(ev.get('timestamp', ''))[:19]}")
+                st.info(result.explanation)
+                st.caption(f"Scorer: {result.scorer_type}")
+
+            with right:
+                st.markdown("#### Ontology context")
+                if loc_labels:
+                    st.markdown("**Node labels:** " + ", ".join(f"`{l}`" for l in loc_labels))
+                st.markdown(f"**Intersection:** `{loc.get('osm_id', 'N/A')}`")
+                if loc.get("landmark_name"):
+                    st.markdown(f"**Landmark:** {loc['landmark_name']}")
+                if role in ("admin", "analyst"):
+                    st.markdown(f"**Driver:** {drv.get('name', 'N/A')} (risk {drv.get('risk_profile', 0):.2f})")
+                    st.markdown(f"**Vehicle:** {veh.get('vehicle_id', 'N/A')}")
+
+            center_lat = float(ev.get("lat") or loc.get("lat") or 0.3382)
+            center_lon = float(ev.get("lon") or loc.get("lon") or 32.5701)
+
+            st.markdown("#### Causal subgraph map")
+            try:
+                from phase4_dashboard.map_view import render_causal_subgraph_map
+                fmap3 = render_causal_subgraph_map(
+                    center_lat, center_lon,
+                    result.subgraph_nodes or [],
+                    result.subgraph_edges or [],
+                    event_type=ev.get("event_type", ""),
+                )
+                html3 = _map_html(fmap3)
+                if html3:
+                    st.components.v1.html(html3, height=420, scrolling=False)
+            except Exception as ex:
+                st.caption(f"Map: {ex}")
+
+            if result.subgraph_nodes:
+                node_x = [n.get("lon", 0) for n in result.subgraph_nodes]
+                node_y = [n.get("lat", 0) for n in result.subgraph_nodes]
+                fig_net = go.Figure()
+                for edge in result.subgraph_edges:
+                    u_id, v_id = str(edge.get("u", "")), str(edge.get("v", ""))
+                    u_n = next((n for n in result.subgraph_nodes if str(n.get("osm_id")) == u_id), None)
+                    v_n = next((n for n in result.subgraph_nodes if str(n.get("osm_id")) == v_id), None)
+                    if u_n and v_n:
+                        fig_net.add_trace(go.Scatter(
+                            x=[u_n.get("lon"), v_n.get("lon"), None],
+                            y=[u_n.get("lat"), v_n.get("lat"), None],
+                            mode="lines", line=dict(color="#95a5a6", width=1), showlegend=False,
+                        ))
+                fig_net.add_trace(go.Scatter(
+                    x=node_x, y=node_y, mode="markers+text",
+                    text=[n.get("label", "") for n in result.subgraph_nodes],
+                    textposition="top center",
+                    marker=dict(size=11, color="#e74c3c"),
+                ))
+                fig_net.update_layout(
+                    title="2-hop ego-graph (campus topology)",
+                    height=360, margin=dict(l=10, r=10, t=40, b=10),
+                )
+                st.plotly_chart(fig_net, use_container_width=True)
+
+            if past and role in ("admin", "analyst"):
+                st.subheader("Driver prior anomaly history")
+                st.dataframe(pd.DataFrame(past).head(10), use_container_width=True, hide_index=True)
+
+
+# === TAB 5: Benchmarks ======================================================
+with tab_bench:
+    st.subheader("ST-Knowledge Graph vs Kimball Star Schema")
+    st.markdown(
+        "Five analytical queries run **10× each**; median latency (ms) reported. "
+        "Q4 (causal chain) is **not expressible** in star schema without expensive spatial joins."
+    )
+
+    bench = load_benchmark_results()
+    col_run, col_info = st.columns([1, 3])
+    with col_run:
+        if st.button("Run benchmarks", type="primary", use_container_width=True):
+            with st.spinner("Running 5 queries × 10 iterations on Neo4j + pandas…"):
+                try:
+                    bench = run_and_cache_benchmarks()
+                    st.success("Complete — results cached.")
+                except Exception as ex:
+                    st.error(str(ex))
+
+    with col_info:
+        if bench:
+            st.caption(f"Cached at `{bench.get('_cached_at', 'previous run')}`")
         else:
-            import pandas as pd
+            st.caption("Click **Run benchmarks** (requires Neo4j + ~30s).")
 
-            df3 = pd.DataFrame(anomalies3)
-            options = df3["event_id"].tolist()
-            labels = {
-                row["event_id"]: f"{row.get('event_type','?')} | {row.get('vehicle_id','?')} | {str(row.get('timestamp',''))[:19]}"
-                for _, row in df3.iterrows()
-            }
+    if bench:
+        import pandas as pd
+        import plotly.express as px
 
-            selected_eid = st.selectbox(
-                "Select anomalous event to investigate:",
-                options,
-                format_func=lambda x: labels.get(x, x),
+        rows = []
+        for name, data in bench.items():
+            if name.startswith("_"):
+                continue
+            rows.append({
+                "Query": name.split(":")[0],
+                "Description": name.split(":", 1)[-1].strip() if ":" in name else name,
+                "ST-KG (ms)": data.get("stkg_median_ms", 0),
+                "Star Schema (ms)": data.get("star_median_ms", 0),
+                "ST-KG OK": data.get("stkg_expressible", True),
+                "Star OK": data.get("star_expressible", True),
+            })
+        df_b = pd.DataFrame(rows)
+        if not df_b.empty:
+            fig_b = px.bar(
+                df_b.melt(id_vars=["Query", "Description"], value_vars=["ST-KG (ms)", "Star Schema (ms)"],
+                          var_name="Architecture", value_name="Median ms"),
+                x="Query", y="Median ms", color="Architecture", barmode="group",
+                title="Query latency: ST-KG vs Star Schema (median of 10 runs)",
+                color_discrete_map={"ST-KG (ms)": "#2ecc71", "Star Schema (ms)": "#95a5a6"},
+            )
+            fig_b.update_layout(height=420)
+            st.plotly_chart(fig_b, use_container_width=True)
+
+            st.dataframe(
+                df_b.style.format({"ST-KG (ms)": "{:.2f}", "Star Schema (ms)": "{:.2f}"}),
+                use_container_width=True,
             )
 
-            if selected_eid:
-                subgraph = _get_subgraph(selected_eid)
-                ev = subgraph.get("event", {})
-                loc = subgraph.get("location", {})
-                drv = subgraph.get("driver", {})
-                veh = subgraph.get("vehicle", {})
-                neighbors = subgraph.get("neighbors", [])
-                past = subgraph.get("past_anomalies", [])
+            q4 = next((r for r in rows if r["Query"] == "Q4"), None)
+            if q4:
+                st.success(
+                    "**Q4 Causal chain:** Native graph traversal in Neo4j vs approximate spatial "
+                    "self-joins in pandas — demonstrates ST-KG expressiveness for campus safety analytics."
+                )
+    else:
+        st.info("No benchmark results yet. Start Neo4j and click **Run benchmarks**.")
 
-                # Score the event
-                result = scorer.score(ev)
-
-                col_a, col_b = st.columns([1, 1])
-
-                with col_a:
-                    st.subheader("Event Details")
-                    st.markdown(f"**Type:** `{ev.get('event_type', 'unknown')}`")
-                    st.markdown(f"**Confidence:** {result.confidence:.2%}")
-                    st.markdown(f"**Severity:** {ev.get('severity_score', 0):.2f}")
-                    st.markdown(f"**Speed:** {ev.get('speed_kmh', 0):.1f} km/h")
-                    st.markdown(f"**Ax:** {ev.get('ax', 0):.3f} m/s²")
-                    st.markdown(f"**Time:** {str(ev.get('timestamp', ''))[:19]}")
-                    st.divider()
-                    st.subheader("Causal Explanation")
-                    st.info(result.explanation)
-                    st.caption(f"_Scorer: {result.scorer_type}_")
-
-                with col_b:
-                    st.subheader("Driver & Vehicle")
-                    if role in ("admin", "analyst"):
-                        st.markdown(f"**Driver:** {drv.get('name', 'N/A')}")
-                        st.markdown(f"**Risk Profile:** {drv.get('risk_profile', 0):.2f}")
-                        st.markdown(f"**Vehicle:** {veh.get('vehicle_id', 'N/A')} — {veh.get('plate', 'N/A')}")
-                        if past:
-                            st.markdown(f"**Prior anomalies:** {len(past)}")
-                    st.subheader("Location")
-                    st.markdown(f"**Intersection:** `{loc.get('osm_id', 'N/A')}`")
-                    st.markdown(f"**Lat/Lon:** {loc.get('lat', 0):.5f}, {loc.get('lon', 0):.5f}")
-                    st.markdown(f"**Adjacent nodes:** {len(neighbors)}")
-
-                # Causal subgraph map
-                st.subheader("Causal Subgraph — 2-hop Campus Topology")
-                center_lat = float(ev.get("lat") or loc.get("lat") or 0.3382)
-                center_lon = float(ev.get("lon") or loc.get("lon") or 32.5701)
-
-                try:
-                    from phase4_dashboard.map_view import render_causal_subgraph_map
-                    fmap3 = render_causal_subgraph_map(
-                        center_lat, center_lon,
-                        result.subgraph_nodes or [],
-                        result.subgraph_edges or [],
-                        event_type=ev.get("event_type", ""),
-                    )
-                    html3 = _map_html(fmap3)
-                    if html3:
-                        st.components.v1.html(html3, height=400)
-                    else:
-                        st.caption("Install folium for map rendering.")
-                except Exception as e:
-                    st.caption(f"Map render error: {e}")
-
-                # Plotly subgraph network diagram
-                if result.subgraph_nodes:
-                    import plotly.graph_objects as go
-                    node_x = [n.get("lon", 0) for n in result.subgraph_nodes]
-                    node_y = [n.get("lat", 0) for n in result.subgraph_nodes]
-                    node_labels = [n.get("label", "Node") for n in result.subgraph_nodes]
-                    node_colors = [
-                        "red" if (abs(n.get("lat", 0) - center_lat) < 0.0002
-                                  and abs(n.get("lon", 0) - center_lon) < 0.0002)
-                        else ("green" if "Stop" in n.get("label", "") or "Crossing" in n.get("label", "")
-                              else "royalblue")
-                        for n in result.subgraph_nodes
-                    ]
-
-                    fig_net = go.Figure()
-                    for edge in result.subgraph_edges:
-                        u_id = str(edge.get("u", ""))
-                        v_id = str(edge.get("v", ""))
-                        u_node = next((n for n in result.subgraph_nodes if str(n.get("osm_id")) == u_id), None)
-                        v_node = next((n for n in result.subgraph_nodes if str(n.get("osm_id")) == v_id), None)
-                        if u_node and v_node:
-                            fig_net.add_trace(go.Scatter(
-                                x=[u_node.get("lon"), v_node.get("lon"), None],
-                                y=[u_node.get("lat"), v_node.get("lat"), None],
-                                mode="lines", line=dict(color="gray", width=1),
-                                showlegend=False, hoverinfo="none",
-                            ))
-                    fig_net.add_trace(go.Scatter(
-                        x=node_x, y=node_y, mode="markers+text",
-                        text=node_labels, textposition="top center",
-                        marker=dict(color=node_colors, size=12, line=dict(color="white", width=1)),
-                        hoverinfo="text",
-                        name="Campus Nodes",
-                    ))
-                    fig_net.update_layout(
-                        title="Causal Subgraph (2-hop ego-graph)",
-                        xaxis_title="Longitude", yaxis_title="Latitude",
-                        showlegend=False, height=350,
-                        margin=dict(l=10, r=10, t=40, b=10),
-                    )
-                    st.plotly_chart(fig_net, use_container_width=True)
-
-                # Past anomaly history
-                if past and role in ("admin", "analyst"):
-                    st.subheader("Driver's Prior Anomaly History")
-                    import pandas as pd
-                    hist_df = pd.DataFrame(past)[
-                        [c for c in ["event_type", "severity_score", "speed_kmh", "timestamp"] if c in pd.DataFrame(past).columns]
-                    ].head(10)
-                    st.dataframe(hist_df, use_container_width=True)
-
-
+st.caption("MakFleet · BIS 3205 · Semantic ST-KG · Privacy-by-Design · Makerere University")

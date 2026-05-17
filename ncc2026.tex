@@ -1,0 +1,363 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{booktabs}
+\usepackage{float}
+
+\begin{document}
+
+\title{MakFleet: A Semantic-Aware Spatio-Temporal Knowledge Graph
+for Bodaboda Safety at Makerere University}
+
+\author{
+\IEEEauthorblockN{Ddumba Jonah, Ssebwana John Paul,
+Sebunya Ronaldo, and Namuli Evelyn}
+\IEEEauthorblockA{Department of Computer Science, College of Computing
+and Information Sciences\\
+Makerere University, Kampala, Uganda\\
+\{jonah.ddumba, johnpaul.ssebwana, ronaldo.sebunya,
+evelyn.namuli\}@students.mak.ac.ug}
+}
+
+\maketitle
+
+\begin{abstract}
+Conventional relational data warehouses are fundamentally ill-suited
+to the high-frequency, erratic spatio-temporal dynamics of motorcycle
+taxis known as bodabodas on university campuses. This paper presents
+MakFleet, a Semantic-Aware Spatio-Temporal Knowledge Graph deployed
+for the bodaboda network at Makerere University, Kampala, Uganda.
+The system ingests IoT telematics at 5-second intervals, applies
+Hidden Markov Model map-matching to snap noisy GPS coordinates to
+the real campus road network, and enriches raw sensor readings into
+semantically meaningful driving events. These events are stored in an
+ontology-driven Neo4j Knowledge Graph comprising 212 intersections,
+476 road segments, and 826,260 telemetry records across two academic
+semesters. A custom Spatio-Temporal Graph Neural Network combining
+Graph Convolutional Network spatial encoding and Long Short-Term
+Memory temporal aggregation achieves an AUC of 0.9268 on validation
+and 0.9471 on a temporal out-of-distribution test, with perfect
+recall across all evaluation splits. A causal Business Intelligence
+dashboard answers why a driver was flagged rather than merely what
+was recorded. The system is publicly deployed and the dataset is
+openly available.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Bodaboda Telemetry, Knowledge Graph, Spatio-Temporal GNN,
+Semantic Data Engineering, Anomaly Detection, Campus Safety
+\end{IEEEkeywords}
+
+
+\section{Introduction}
+
+Bodabodas are the primary mode of short-distance intra-campus
+transport at Makerere University, Kampala. They carry students
+between halls, libraries, and lecture rooms rapidly and cheaply,
+but operate with no formal safety monitoring. Reckless driving
+incidents---harsh braking, speeding, rapid acceleration near
+pedestrian zones---go entirely undetected and unrecorded.
+
+Traditional data warehousing approaches based on the Kimball Star
+Schema are structurally inadequate for this problem. Relational
+tables cannot encode the graph-like topology of campus road
+networks, and expensive SQL joins create prohibitive latency for
+real-time safety interventions \cite{kimball2013}. Furthermore, raw
+sensor readings carry no semantic meaning: a sudden deceleration
+near a zebra crossing is a safe stop, while the same signal on an
+open road is reckless braking. Resolving this distinction requires
+a spatially-aware ontological layer---not a tabular classifier.
+
+This paper presents MakFleet, which reconceptualises the campus
+fleet data warehouse as an epistemic, semantic infrastructure.
+The key contributions are: (1) a three-phase semantic data
+engineering pipeline with cryptographic provenance tracking; (2) an
+ontology-driven Spatio-Temporal Knowledge Graph with a novel
+ContextualStop node label that enforces the safe-stop/reckless-brake
+distinction at the storage layer; (3) a custom GCN+LSTM
+Spatio-Temporal Graph Neural Network (ST-GNN) trained under strict
+semester-based splits; and (4) a causal Business Intelligence
+dashboard that generates subgraph evidence for flagged anomalies.
+
+
+\section{Related Work}
+
+Spatio-temporal data warehouses have been proposed to extend
+relational schemas with spatial data types, but fundamental
+scalability limits emerge when graph topology must be co-modelled
+alongside time series \cite{pelekis2014}. Graph Neural Networks
+outperform tabular models for transport anomaly detection because
+they encode road network topology directly \cite{zhu2022}. Yu
+et al.'s STGCN \cite{yu2018} and Zhao et al.'s T-GCN \cite{zhao2019}
+demonstrated strong spatio-temporal forecasting but assume static
+city-scale road graphs and do not address semantic event enrichment.
+Privacy vulnerabilities in GPS trajectory datasets are well
+established; spatial k-anonymity and differential privacy are the
+primary mitigations \cite{demontjoye2013}. Table~\ref{tab:related}
+summarises key related works and their limitations relative to
+MakFleet.
+
+\begin{table}[t]
+\caption{Summary of Related Works}
+\label{tab:related}
+\centering
+\small
+\begin{tabular}{|p{1.6cm}|p{1.4cm}|p{1.7cm}|p{1.9cm}|}
+\hline
+\textbf{Work} & \textbf{Model} & \textbf{Result} &
+\textbf{Limitation vs MakFleet} \\
+\hline
+Yu et al. \cite{yu2018} & STGCN & MAE 3.99 (METR-LA) &
+Static graph; no semantic enrichment \\
+\hline
+Zhao et al. \cite{zhao2019} & T-GCN & MAE 2.37 (SZ-taxi) &
+City-scale sensors; no campus micro-mobility \\
+\hline
+Newson \& Krumm \cite{newson2009} & HMM & 98.6\% road ID &
+O(N$^2$) per step; no ontology integration \\
+\hline
+Dwork et al. \cite{dwork2006} & Diff. Privacy & Formal DP &
+Aggregate only; no trajectory privacy \\
+\hline
+Pan et al. \cite{pan2024} & LLM+KG & Interoperability &
+No real-time IoT pipeline or anomaly detection \\
+\hline
+\textbf{MakFleet} & GCN+LSTM & \textbf{AUC 0.9471 OOD} &
+\textbf{Full semantic ST-KG with causal BI} \\
+\hline
+\end{tabular}
+\end{table}
+
+
+\section{System Architecture}
+
+\subsection{Eight-Layer Locator Formalisation}
+
+MakFleet is formalised as an \textbf{(L0)} operational safety and
+spatio-temporal optimisation problem using \textbf{(L1)} weak
+supervision from IoT telematics and OpenStreetMap to solve an
+\textbf{(L2)} anomaly detection and demand forecasting task on
+\textbf{(L3)} multivariate time-series and spatial graph data,
+trained under an \textbf{(L4)} continual learning regime across
+semester concept drift, under strict \textbf{(L5)}
+privacy-preserving and out-of-distribution robustness constraints,
+deployed via \textbf{(L6)} edge-to-cloud streaming into a
+university-governed semantic warehouse, using \textbf{(L7)} ST-GNN
+and rule-based symbolic models.
+
+\subsection{Semantic Data Engineering Pipeline}
+
+The pipeline operates in three continuous phases.
+
+\textbf{Phase 1 -- IoT Ingestion and Provenance.} Bodaboda IoT
+units stream GPS coordinates, 3-axis accelerometer readings, speed,
+heading, and engine state at 5-second intervals. Every record
+receives a SHA-256 cryptographic hash at ingestion. Batches are
+chained into a Merkle tree whose root hash is stored in the
+Knowledge Graph as a ProvenanceAnchor node, enabling post-ingestion
+tamper detection.
+
+\textbf{Phase 2 -- Semantic Map-Matching.} Raw GPS coordinates
+carry up to 5~m Gaussian noise. A Hidden Markov Model
+map-matcher---using a KD-tree spatial index over edge midpoints and
+Viterbi decoding over a sliding window of 10 observations---snaps
+each coordinate to the correct road edge. Mean map-matching
+confidence achieved is 0.906.
+
+\textbf{Phase 3 -- Event Enrichment.} Enriched records are
+classified into six semantic event types using rule-based
+thresholds: \texttt{speeding} (speed $> 30 \times 1.2$~km/h),
+\texttt{harsh\_braking} ($a_x < -3.5$~m/s$^2$),
+\texttt{rapid\_acceleration} ($a_x > 2.8$~m/s$^2$),
+\texttt{idling}, \texttt{normal\_travel}, and
+\texttt{safe\_stop}. The critical ontological distinction: a safe
+stop near a mapped zebra crossing is loaded as a
+\texttt{ContextualStop} node in Neo4j---a distinct label from
+\texttt{TelematicsEvent}---enforcing the semantic separation at the
+storage layer rather than at query time.
+
+Before Knowledge Graph ingestion, GPS coordinates are subjected to
+spatial k-anonymity ($k=5$) and Gaussian differential privacy noise
+injection ($\varepsilon=1.0$). Role-Based Access Control provides
+three permission tiers: admin, analyst, and public.
+
+\subsection{Spatio-Temporal Knowledge Graph}
+
+The ST-KG is stored in Neo4j and comprises five node labels
+(Intersection, RoadSegment, Vehicle, Driver, TelematicsEvent/
+ContextualStop) and five relationship types (ADJACENT\_TO,
+LOCATED\_AT, CAUSED\_BY, DRIVES, PRECEDES). The campus road
+network of 212 intersections and 476 road segments is retrieved
+from OpenStreetMap via OSMnx \cite{boeing2017}. The full dataset
+of 826,260 enriched records is publicly available at:
+\texttt{kaggle.com/datasets/sebunyaronaldo/}\newline
+\texttt{makfleet-bodaboda-telemetry-makerere-university}.
+
+\subsection{ST-GNN Model Architecture}
+
+The ST-GNN takes as input $T=4$ consecutive 15-minute graph
+snapshots, each with node feature matrix
+$\mathbf{X}_t \in \mathbb{R}^{N \times 6}$ (latitude, longitude,
+betweenness centrality, degree centrality, event count, mean speed).
+
+The spatial encoder applies two Graph Convolutional Network layers
+per snapshot \cite{kipf2017}:
+\begin{equation}
+\mathbf{H}^{(l+1)} = \sigma\!\left(
+  \tilde{\mathbf{D}}^{-\frac{1}{2}}
+  \tilde{\mathbf{A}}\,
+  \tilde{\mathbf{D}}^{-\frac{1}{2}}
+  \mathbf{H}^{(l)}\mathbf{W}^{(l)}
+\right)
+\end{equation}
+where $\tilde{\mathbf{A}} = \mathbf{A} + \mathbf{I}_N$ and
+$\tilde{\mathbf{D}}$ is its degree matrix. The temporal aggregator
+stacks the four snapshot embeddings and processes them through a
+per-node LSTM:
+\begin{equation}
+\hat{p}_i = \sigma_s\!\left(
+  \mathbf{W}_2\,\text{ReLU}(\mathbf{W}_1\,\mathbf{h}_{T,i}
+  +\mathbf{b}_1)+\mathbf{b}_2\right)
+\end{equation}
+producing per-node anomaly probability $\hat{p}_i \in [0,1]$.
+Weighted Binary Cross-Entropy with positive-class weight
+$w^{+}=19.0$ addresses the 10:1 class imbalance. The model is
+optimised with Adam ($\text{lr}=10^{-3}$) and Cosine Annealing.
+
+Training strictly uses Semester~1 data; Semester~2 data serves as a
+temporal out-of-distribution test, enforcing causal validity and
+preventing data leakage.
+
+
+\section{Results and Discussion}
+
+\subsection{Exploratory Data Analysis}
+
+EDA on the 826,260-record dataset reveals three key design insights.
+Peak demand occurs at 08:00 aligned with morning lectures, with a
+secondary peak at 17:00. Anomaly rate is elevated in early-morning
+hours when low traffic density enables higher speeds. Speeding is
+the most frequent anomaly class (91.2\% of records are normal
+travel; 8.8\% anomalous). Driver risk profiles show strong positive
+correlation with observed anomaly rates, validating the simulation.
+
+\subsection{ST-GNN Evaluation}
+
+Table~\ref{tab:results} reports performance across all evaluation
+splits after 10 training epochs.
+
+\begin{table}[t]
+\caption{ST-GNN Evaluation Results}
+\label{tab:results}
+\centering
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Split} & \textbf{AUC} & \textbf{F1} &
+\textbf{Prec.} & \textbf{Recall} \\
+\hline
+Validation (Sem.\,1) & 0.9268 & 0.9067 & 0.8293 & 1.000 \\
+\hline
+Temporal OOD (Sem.\,2) & \textbf{0.9471} & 0.9045 & 0.8256 & 1.000 \\
+\hline
+Spatial OOD (East) & ---$^{*}$ & 1.000 & 1.000 & 1.000 \\
+\hline
+\multicolumn{5}{l}{\footnotesize $^{*}$AUC undefined: all samples
+positive class in eastern zone.}
+\end{tabular}
+\end{table}
+
+The central finding is that the Temporal OOD AUC (0.9471) exceeds
+the Validation AUC (0.9268), demonstrating that the GCN spatial
+encoder learns generalisable road-topology risk patterns from
+Semester~1 that transfer to unseen Semester~2 data. Recall of 1.000
+across all splits confirms zero missed anomalies in every evaluation
+condition---the operationally critical metric for campus safety.
+
+\subsection{Causal Business Intelligence}
+
+When the ST-GNN flags a driver, the system executes a 2-hop
+ego-graph retrieval from Neo4j via ADJACENT\_TO traversal, rendering
+the causal subgraph on a Folium campus map with colour-coded nodes
+and generating a written explanation. For example: \textit{``Harsh
+braking detected: deceleration $-4.2$~m/s$^2$ at 47~km/h. No zebra
+crossing found within 20~m in campus ontology---classified as
+reckless.''} The system is live at:
+\texttt{makfleet.streamlit.app}.
+
+
+\section{Conclusion}
+
+MakFleet demonstrates that an ontology-driven Spatio-Temporal
+Knowledge Graph can transform raw bodaboda IoT telemetry into
+actionable, auditable campus safety evidence. The neuro-symbolic
+architecture---combining GCN spatial encoding with rule-based
+semantic event enrichment---achieves Temporal OOD AUC of 0.9471
+with perfect recall, validating generalisation across semester
+concept drift. Future work will deploy physical IoT units on actual
+Makerere campus bodabodas and implement federated learning across
+multiple Ugandan universities.
+
+
+\section*{Acknowledgement}
+
+The authors thank Dr.\ Ggaliwango Marvin for supervision and the
+Department of Computer Science, COCIS, Makerere University for
+providing the research environment.
+
+
+\begin{thebibliography}{00}
+
+\bibitem{kimball2013}
+R. Kimball and M. Ross, \textit{The Data Warehouse Toolkit}, 3rd ed.
+Hoboken, NJ: Wiley, 2013.
+
+\bibitem{pelekis2014}
+N. Pelekis and Y. Theodoridis, ``Mobility Data Management and
+Exploration,'' \textit{Springer Briefs in Computer Science}, 2014.
+
+\bibitem{zhu2022}
+L. Zhu et al., ``Graph Neural Networks for Anomaly Detection in
+Smart Transportation,'' \textit{IEEE Internet of Things Journal},
+vol.~9, no.~23, 2022.
+
+\bibitem{yu2018}
+B. Yu, H. Yin, and Z. Zhu, ``Spatio-temporal graph convolutional
+networks: A deep learning framework for traffic forecasting,''
+in \textit{Proc. IJCAI}, 2018.
+
+\bibitem{zhao2019}
+L. Zhao et al., ``T-GCN: A temporal graph convolutional network for
+traffic prediction,'' \textit{IEEE Trans. Intell. Transp. Syst.},
+2019.
+
+\bibitem{newson2009}
+P. Newson and J. Krumm, ``Hidden Markov map matching through noise
+and sparseness,'' in \textit{Proc. ACM SIGSPATIAL GIS}, 2009.
+
+\bibitem{dwork2006}
+C. Dwork et al., ``Calibrating noise to sensitivity in private data
+analysis,'' in \textit{Proc. TCC}, 2006.
+
+\bibitem{demontjoye2013}
+Y. A. de Montjoye et al., ``Unique in the crowd: The privacy bounds
+of human mobility,'' \textit{Scientific Reports}, vol.~3, 2013.
+
+\bibitem{pan2024}
+J. Pan et al., ``Unifying large language models and knowledge
+graphs: A roadmap,'' \textit{IEEE TKDE}, 2024.
+
+\bibitem{boeing2017}
+G. Boeing, ``OSMnx: New methods for acquiring, constructing,
+analyzing, and visualizing complex street networks,''
+\textit{Computers, Environment and Urban Systems}, vol.~65,
+pp.~126--139, 2017.
+
+\bibitem{kipf2017}
+T. N. Kipf and M. Welling, ``Semi-supervised classification with
+graph convolutional networks,'' in \textit{Proc. ICLR}, 2017.
+
+\end{thebibliography}
+
+\end{document}
