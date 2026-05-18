@@ -133,6 +133,38 @@ async def root():
     return FileResponse(str(STATIC_DIR / "index.html"))
 
 
+@app.get("/api/debug")
+async def debug():
+    """Diagnose Neo4j connection — open this URL to see what's failing."""
+    import os
+    result = {
+        "neo4j_uri":  os.environ.get("NEO4J_URI", "NOT SET"),
+        "neo4j_user": os.environ.get("NEO4J_USER", "NOT SET"),
+        "neo4j_password_set": bool(os.environ.get("NEO4J_PASSWORD")),
+        "events_file_exists": _EVENTS_PATH.exists(),
+        "events_loaded": len(_events_cache),
+        "neo4j_connection": "untested",
+        "neo4j_error": None,
+        "sample_kpi": None,
+    }
+    try:
+        from neo4j import GraphDatabase
+        uri  = os.environ.get("NEO4J_URI")
+        user = os.environ.get("NEO4J_USER")
+        pw   = os.environ.get("NEO4J_PASSWORD")
+        driver = GraphDatabase.driver(uri, auth=(user, pw))
+        driver.verify_connectivity()
+        result["neo4j_connection"] = "OK"
+        with driver.session() as s:
+            row = s.run("MATCH (e:TelematicsEvent) RETURN count(e) AS n").single()
+            result["sample_kpi"] = {"TelematicsEvent_count": row["n"] if row else 0}
+        driver.close()
+    except Exception as e:
+        result["neo4j_connection"] = "FAILED"
+        result["neo4j_error"] = str(e)
+    return result
+
+
 # ── API: KPIs ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/kpis")
