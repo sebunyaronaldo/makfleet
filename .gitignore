@@ -22,8 +22,10 @@ __pycache__/
 build_presentation.py
 export_dataset.py
 load_aura.py
-MakFleet_Training_Colab.ipynb
 eda_*.png
 MakFleet_Presentation.pptx
 presentation_script.md
 DWHCS2
+
+# Root-level notebooks (moved to notebooks/ folder)
+MakFleet_Training_Colab.ipynb
