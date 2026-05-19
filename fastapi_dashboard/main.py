@@ -121,7 +121,8 @@ _tracker = LiveTracker(events_per_tick=25)
 
 
 def _load_events_from_neo4j() -> list[dict]:
-    """Load GPS trajectory data from Neo4j for the live tracker."""
+    """Load GPS trajectory data from Neo4j for the live tracker.
+    Loads up to 500 events per vehicle for fast startup."""
     try:
         import os
         from neo4j import GraphDatabase
@@ -132,23 +133,39 @@ def _load_events_from_neo4j() -> list[dict]:
             return []
         driver = GraphDatabase.driver(uri, auth=(user, pw))
         driver.verify_connectivity()
+        # Get distinct vehicle IDs first
         with driver.session() as s:
-            result = s.run("""
+            veh_result = s.run("""
                 MATCH (e:TelematicsEvent)
-                WHERE e.lat IS NOT NULL AND e.lon IS NOT NULL
-                RETURN e.vehicle_id AS vehicle_id,
-                       e.lat        AS lat,
-                       e.lon        AS lon,
-                       e.speed_kmh  AS speed_kmh,
-                       e.event_type AS event_type,
-                       e.is_anomaly AS is_anomaly,
-                       e.severity_score AS severity_score,
-                       e.timestamp  AS timestamp
-                ORDER BY e.vehicle_id, e.timestamp
+                WHERE e.vehicle_id IS NOT NULL
+                RETURN DISTINCT e.vehicle_id AS vid
+                LIMIT 15
             """)
-            events = [dict(r) for r in result]
+            vehicle_ids = [r["vid"] for r in veh_result]
+
+        # Load 500 events per vehicle — enough for smooth replay
+        all_events = []
+        with driver.session() as s:
+            for vid in vehicle_ids:
+                result = s.run("""
+                    MATCH (e:TelematicsEvent {vehicle_id: $vid})
+                    WHERE e.lat IS NOT NULL AND e.lon IS NOT NULL
+                    RETURN e.vehicle_id AS vehicle_id,
+                           e.lat        AS lat,
+                           e.lon        AS lon,
+                           e.speed_kmh  AS speed_kmh,
+                           e.event_type AS event_type,
+                           e.is_anomaly AS is_anomaly,
+                           e.severity_score AS severity_score,
+                           e.timestamp  AS timestamp
+                    ORDER BY e.timestamp
+                    LIMIT 500
+                """, vid=vid)
+                all_events.extend([dict(r) for r in result])
+
         driver.close()
-        return events
+        print(f"[tracker] Loaded {len(all_events)} events for {len(vehicle_ids)} vehicles")
+        return all_events
     except Exception as ex:
         print(f"[tracker] Neo4j load failed: {ex}")
         return []
@@ -450,9 +467,15 @@ async def api_demand(semester: int = Query(0)):
 # ── SSE: Live vehicle positions ───────────────────────────────────────────────
 
 async def _position_stream():
+    keepalive = 0
     while True:
         positions = _tracker.tick()
-        yield f"data: {json.dumps(positions)}\n\n"
+        if positions:
+            yield f"data: {json.dumps(positions)}\n\n"
+        else:
+            # Send keepalive comment so Railway proxy doesn't close the connection
+            yield f": keepalive {keepalive}\n\n"
+        keepalive += 1
         await asyncio.sleep(3)
 
 
