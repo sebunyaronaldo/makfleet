@@ -14,7 +14,9 @@ MAKERERE_BBOX = (0.3340, 32.5680, 0.3420, 32.5760)
 # Neo4j — reads from environment variables, falls back to local Docker defaults
 import os
 NEO4J_URI      = os.environ.get("NEO4J_URI",      "bolt://127.0.0.1:7687")
-NEO4J_USER     = os.environ.get("NEO4J_USER",     "neo4j")
+NEO4J_USER     = (os.environ.get("NEO4J_USER") or
+                  os.environ.get("NEO4J_USERNAME") or
+                  "1a273157")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "makfleet2024")
 NEO4J_AUTH     = (NEO4J_USER, NEO4J_PASSWORD)
 

@@ -150,7 +150,7 @@ async def debug():
     try:
         from neo4j import GraphDatabase
         uri  = os.environ.get("NEO4J_URI")
-        user = os.environ.get("NEO4J_USER")
+        user = os.environ.get("NEO4J_USER") or os.environ.get("NEO4J_USERNAME") or "1a273157"
         pw   = os.environ.get("NEO4J_PASSWORD")
         driver = GraphDatabase.driver(uri, auth=(user, pw))
         driver.verify_connectivity()
