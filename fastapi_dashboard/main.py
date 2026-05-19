@@ -120,9 +120,47 @@ class LiveTracker:
 _tracker = LiveTracker(events_per_tick=25)
 
 
+def _load_events_from_neo4j() -> list[dict]:
+    """Load GPS trajectory data from Neo4j for the live tracker."""
+    try:
+        import os
+        from neo4j import GraphDatabase
+        uri  = os.environ.get("NEO4J_URI")
+        user = os.environ.get("NEO4J_USER") or os.environ.get("NEO4J_USERNAME") or "1a273157"
+        pw   = os.environ.get("NEO4J_PASSWORD")
+        if not uri or not pw:
+            return []
+        driver = GraphDatabase.driver(uri, auth=(user, pw))
+        driver.verify_connectivity()
+        with driver.session() as s:
+            result = s.run("""
+                MATCH (e:TelematicsEvent)
+                WHERE e.lat IS NOT NULL AND e.lon IS NOT NULL
+                RETURN e.vehicle_id AS vehicle_id,
+                       e.lat        AS lat,
+                       e.lon        AS lon,
+                       e.speed_kmh  AS speed_kmh,
+                       e.event_type AS event_type,
+                       e.is_anomaly AS is_anomaly,
+                       e.severity_score AS severity_score,
+                       e.timestamp  AS timestamp
+                ORDER BY e.vehicle_id, e.timestamp
+            """)
+            events = [dict(r) for r in result]
+        driver.close()
+        return events
+    except Exception as ex:
+        print(f"[tracker] Neo4j load failed: {ex}")
+        return []
+
+
 @app.on_event("startup")
 async def startup():
     events = _load_events()
+    if not events:
+        print("[tracker] Local file empty — loading trajectories from Neo4j...")
+        events = _load_events_from_neo4j()
+        print(f"[tracker] Loaded {len(events)} events from Neo4j")
     _tracker.init(events)
 
 
